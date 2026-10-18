@@ -1,0 +1,16 @@
+== Checagem 2026-10-18 08:29:37 ==
+NAME          STATE
+lab-app       running
+lab-backup    running
+lab-gerador   running
+lab-haproxy   running
+lab-kuma      running
+lab-minio     running
+pg-primary    running
+pg-replica    running
+replicacao|streaming
+replica_em_recovery|t
+primario|4785|2026-10-18 11:29:36.748612+00
+replica|4785|2026-10-18 11:29:36.748612+00
+arquivamento|82|2026-10-18 11:27:41.102697+00
+backups_locais: 2

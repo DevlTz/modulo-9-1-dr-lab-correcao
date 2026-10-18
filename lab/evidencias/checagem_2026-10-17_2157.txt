@@ -1,0 +1,8 @@
+== Checagem 2026-10-17 21:57:47 ==
+NAME      STATE
+service "pg-primary" is not running
+service "pg-replica" is not running
+service "pg-primary" is not running
+service "pg-replica" is not running
+service "pg-primary" is not running
+backups_locais: service "backup" is not running

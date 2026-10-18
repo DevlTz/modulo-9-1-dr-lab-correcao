@@ -1,0 +1,15 @@
+== Checagem 2026-10-18 08:10:19 ==
+NAME          STATE
+lab-app       running
+lab-gerador   running
+lab-haproxy   running
+lab-kuma      running
+lab-minio     running
+pg-primary    running
+pg-replica    running
+replicacao|streaming
+replica_em_recovery|t
+primario|4560|2026-10-18 11:10:17.213367+00
+replica|4560|2026-10-18 11:10:17.213367+00
+arquivamento|82|2026-10-18 11:09:33.628641+00
+backups_locais: service "backup" is not running
