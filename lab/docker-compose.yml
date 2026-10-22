@@ -1,18 +1,22 @@
+# Versão derivada dos anexos; ler README.md antes da aplicação.
 name: lab91
-
-# Módulo 9.1 — Laboratório de DR ponta a ponta (ambiente de referência).
-# Regra de ouro: tudo roda nesta rede isolada. Nunca aponte para produção.
-# OBS: $$ nas linhas de shell é o escape do compose para um $ literal.
-
 services:
   archive-init:
     image: postgres:16
     container_name: lab-archive-init
     volumes:
-      - wal_archive:/archive
-    command: ["sh", "-c", "chown 999:999 /archive && chmod 0750 /archive"]
-    networks: [lab]
-
+    - wal_archive:/archive
+    command:
+    - sh
+    - -c
+    - chown 999:999 /archive && chmod 0750 /archive
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   pg-primary:
     image: postgres:16
     container_name: pg-primary
@@ -23,26 +27,32 @@ services:
     environment:
       POSTGRES_PASSWORD: lab91pass
       POSTGRES_DB: loja
-    command: >
-      postgres
-      -c wal_level=replica
-      -c max_wal_senders=10
-      -c wal_keep_size=256MB
-      -c hot_standby=on
-      -c max_connections=60
-      -c archive_mode=on
-      -c archive_timeout=60
-      -c archive_command='test ! -f /archive/%f && cp %p /archive/%f'
+      NODE_NAME: pg-primary
+      PGDATA: /var/lib/postgresql/data
+    command:
+    - bash
+    - /opt/lab/start-db.sh
     volumes:
-      - primary_data:/var/lib/postgresql/data
-      - wal_archive:/archive
-      - ./initdb:/docker-entrypoint-initdb.d:ro
+    - primary_data:/var/lib/postgresql/data
+    - wal_archive:/archive
+    - ./initdb:/docker-entrypoint-initdb.d:ro
+    - ./scripts:/opt/lab:ro
+    - ./runtime:/control:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d loja"]
+      test:
+      - CMD-SHELL
+      - pg_isready -h 127.0.0.1 -U postgres -d loja
       interval: 5s
-      retries: 10
-    networks: [lab]
-
+      timeout: 3s
+      retries: 12
+    networks:
+    - lab
+    restart: 'no'
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   pg-replica:
     image: postgres:16
     container_name: pg-replica
@@ -50,119 +60,233 @@ services:
     mem_limit: 512m
     environment:
       PGPASSWORD: replica123
+      NODE_NAME: pg-replica
+      PGDATA: /var/lib/postgresql/data
     depends_on:
-      pg-primary:
-        condition: service_healthy
+      archive-init:
+        condition: service_completed_successfully
     volumes:
-      - replica_data:/var/lib/postgresql/data
-    command: >
-      bash -c '
-      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
-        rm -rf /var/lib/postgresql/data/*;
-        pg_basebackup -h pg-primary -U replicador -D /var/lib/postgresql/data -Fp -Xs -R -P;
-        chmod 0700 /var/lib/postgresql/data;
-      fi;
-      exec postgres -c hot_standby=on'
-    networks: [lab]
-
+    - replica_data:/var/lib/postgresql/data
+    - wal_archive:/archive
+    - ./scripts:/opt/lab:ro
+    - ./runtime:/control:ro
+    command:
+    - bash
+    - /opt/lab/start-db.sh
+    networks:
+    - lab
+    restart: 'no'
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -h 127.0.0.1 -U postgres -d loja
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   haproxy:
-    image: haproxy:2.9-alpine
     container_name: lab-haproxy
-    depends_on: [pg-primary, pg-replica]
     ports:
-      - "5432:5432"
-      - "8404:8404"
+    - 127.0.0.1:5432:5432
+    - 127.0.0.1:8404:8404
     volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-    networks: [lab]
-
+    - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    - ./scripts:/opt/lab:ro
+    - ./runtime:/control:ro
+    networks:
+    - lab
+    build: ./haproxy
+    environment:
+      PGPASSWORD: lab91pass
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - psql -X -w -h 127.0.0.1 -U postgres -d loja -Atq -v ON_ERROR_STOP=1 -c 'SELECT
+        NOT pg_is_in_recovery()' | grep -qx t
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    entrypoint:
+    - sh
+    - /opt/lab/start-haproxy.sh
   gerador:
     image: postgres:16-alpine
     container_name: lab-gerador
-    depends_on: [haproxy]
+    depends_on:
+    - haproxy
     environment:
       PGPASSWORD: lab91pass
-    command: >
-      sh -c 'while true; do
-        psql -h haproxy -U postgres -d loja -c "INSERT INTO pedidos (cliente, valor) VALUES (md5(random()::text), round((random()*500)::numeric,2));" >/dev/null 2>&1 || echo "$$(date -Iseconds) ESCRITA FALHOU";
-        sleep 5;
-      done'
-    networks: [lab]
-
+    command: "sh -c 'while true; do\n  psql -h haproxy -U postgres -d loja -c \"INSERT\
+      \ INTO pedidos (cliente, valor) VALUES (md5(random()::text), round((random()*500)::numeric,2));\"\
+      \ >/dev/null 2>&1 || echo \"$$(date -Iseconds) ESCRITA FALHOU\";\n  sleep 5;\n\
+      done'\n"
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   app:
     image: adminer:4
     container_name: lab-app
-    depends_on: [haproxy]
+    depends_on:
+    - haproxy
     environment:
       ADMINER_DEFAULT_SERVER: haproxy
     ports:
-      - "8080:8080"
-    networks: [lab]
-
+    - 127.0.0.1:8080:8080
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   minio:
-    image: cgr.dev/chainguard/minio:latest # Descontinuado minio/minio:latest
+    image: cgr.dev/chainguard/minio:latest
     container_name: lab-minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: labadmin
       MINIO_ROOT_PASSWORD: lab91minio
     ports:
-      - "9000:9000"
-      - "9001:9001"
+    - 127.0.0.1:9000:9000
+    - 127.0.0.1:9001:9001
     volumes:
-      - minio_data:/data
-    networks: [lab]
-
+    - minio_data:/data
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   minio-test:
-    image: cgr.dev/chainguard/minio-client:latest-dev
+    build: ./backup
+    image: lab91-backup:local
     container_name: lab-minio-test
-    depends_on: [minio]
-    entrypoint:
-      - sh
-      - -c
-      - >
-        until mc alias set minio http://minio:9000 labadmin lab91minio >/dev/null 2>&1; do sleep 1; done;
-        TS=$$(date +%Y%m%d%H%M%S);
-        (mc mb --ignore-existing --with-lock minio/backups &&
-        mc retention set --default COMPLIANCE 7d minio/backups &&
-        echo "teste escrita $$TS" > /tmp/teste_$$TS.txt &&
-        mc cp /tmp/teste_$$TS.txt minio/backups/teste_$$TS.txt &&
-        mc cat minio/backups/teste_$$TS.txt) && echo "MINIO TESTE OK" || echo "MINIO TESTE FALHOU"
-    networks: [lab]
-
-  backup:
-    image: postgres:16-alpine
-    container_name: lab-backup
-    depends_on: [pg-primary]
     environment:
+      PGHOST: haproxy
+      PGUSER: postgres
+      PGDATABASE: loja
       PGPASSWORD: lab91pass
-    entrypoint: >
-      sh -c 'mkdir -p /backups;
-        while true; do
-          pg_dump -h pg-primary -U postgres -d loja -Fc > /backups/bk_$$(date +%Y%m%d_%H%M).dump 2>/dev/null && echo "backup $$(date +%H:%M) OK" || echo "backup FALHOU";
-          sleep 900;
-        done'
+      PGCONNECT_TIMEOUT: '3'
+      S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: labadmin
+      AWS_SECRET_ACCESS_KEY: lab91minio
+      S3_BUCKET: backups
+      BACKUP_INTERVAL: '60'
+      RPO_SECONDS: '300'
+      RETENTION_DAYS: '7'
+      MAX_LOCAL_KEEP: '3'
+    command:
+    - init
+    depends_on:
+    - minio
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  backup:
+    build: ./backup
+    image: lab91-backup:local
+    container_name: lab-backup
+    environment:
+      PGHOST: haproxy
+      PGUSER: postgres
+      PGDATABASE: loja
+      PGPASSWORD: lab91pass
+      PGCONNECT_TIMEOUT: '3'
+      S3_ENDPOINT: http://minio:9000
+      AWS_ACCESS_KEY_ID: labadmin
+      AWS_SECRET_ACCESS_KEY: lab91minio
+      S3_BUCKET: backups
+      BACKUP_INTERVAL: '60'
+      RPO_SECONDS: '300'
+      RETENTION_DAYS: '7'
+      MAX_LOCAL_KEEP: '3'
+    command:
+    - loop
+    depends_on:
+      minio-test:
+        condition: service_completed_successfully
     volumes:
-      - backups_local:/backups
-    networks: [lab]
-
+    - backups_local:/backups
+    healthcheck:
+      test:
+      - CMD
+      - python3
+      - /opt/backup.py
+      - health
+      interval: 20s
+      timeout: 5s
+      retries: 2
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
   kuma:
     image: louislam/uptime-kuma:2
     container_name: lab-kuma
     ports:
-      - "3001:3001"
+    - 127.0.0.1:3001:3001
     volumes:
-      - kuma_data:/app/data
-    networks: [lab]
-
+    - kuma_data:/app/data
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  restore-db:
+    image: postgres:16
+    profiles:
+    - restore
+    environment:
+      POSTGRES_PASSWORD: restore-lab-only
+      POSTGRES_DB: restorecheck
+    tmpfs:
+    - /var/lib/postgresql/data:rw,size=512m
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -h 127.0.0.1 -U postgres -d restorecheck
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks:
+    - lab
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
 volumes:
-  primary_data:
-  replica_data:
-  wal_archive:
-  minio_data:
-  backups_local:
-  kuma_data:
-
+  primary_data: null
+  replica_data: null
+  wal_archive: null
+  minio_data: null
+  backups_local: null
+  kuma_data: null
 networks:
   lab:
     driver: bridge

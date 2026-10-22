@@ -1,0 +1,168 @@
+name: lab91
+
+# Módulo 9.1 — Laboratório de DR ponta a ponta (ambiente de referência).
+# Regra de ouro: tudo roda nesta rede isolada. Nunca aponte para produção.
+# OBS: $$ nas linhas de shell é o escape do compose para um $ literal.
+
+services:
+  archive-init:
+    image: postgres:16
+    container_name: lab-archive-init
+    volumes:
+      - wal_archive:/archive
+    command: ["sh", "-c", "chown 999:999 /archive && chmod 0750 /archive"]
+    networks: [lab]
+
+  pg-primary:
+    image: postgres:16
+    container_name: pg-primary
+    mem_limit: 512m
+    depends_on:
+      archive-init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_PASSWORD: lab91pass
+      POSTGRES_DB: loja
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c wal_keep_size=256MB
+      -c hot_standby=on
+      -c max_connections=60
+      -c archive_mode=on
+      -c archive_timeout=60
+      -c archive_command='test ! -f /archive/%f && cp %p /archive/%f'
+    volumes:
+      - primary_data:/var/lib/postgresql/data
+      - wal_archive:/archive
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d loja"]
+      interval: 5s
+      retries: 10
+    networks: [lab]
+
+  pg-replica:
+    image: postgres:16
+    container_name: pg-replica
+    user: postgres
+    mem_limit: 512m
+    environment:
+      PGPASSWORD: replica123
+    depends_on:
+      pg-primary:
+        condition: service_healthy
+    volumes:
+      - replica_data:/var/lib/postgresql/data
+    command: >
+      bash -c '
+      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+        rm -rf /var/lib/postgresql/data/*;
+        pg_basebackup -h pg-primary -U replicador -D /var/lib/postgresql/data -Fp -Xs -R -P;
+        chmod 0700 /var/lib/postgresql/data;
+      fi;
+      exec postgres -c hot_standby=on'
+    networks: [lab]
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    container_name: lab-haproxy
+    depends_on: [pg-primary, pg-replica]
+    ports:
+      - "5432:5432"
+      - "8404:8404"
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks: [lab]
+
+  gerador:
+    image: postgres:16-alpine
+    container_name: lab-gerador
+    depends_on: [haproxy]
+    environment:
+      PGPASSWORD: lab91pass
+    command: >
+      sh -c 'while true; do
+        psql -h haproxy -U postgres -d loja -c "INSERT INTO pedidos (cliente, valor) VALUES (md5(random()::text), round((random()*500)::numeric,2));" >/dev/null 2>&1 || echo "$$(date -Iseconds) ESCRITA FALHOU";
+        sleep 5;
+      done'
+    networks: [lab]
+
+  app:
+    image: adminer:4
+    container_name: lab-app
+    depends_on: [haproxy]
+    environment:
+      ADMINER_DEFAULT_SERVER: haproxy
+    ports:
+      - "8080:8080"
+    networks: [lab]
+
+  minio:
+    image: cgr.dev/chainguard/minio:latest # Descontinuado minio/minio:latest
+    container_name: lab-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: labadmin
+      MINIO_ROOT_PASSWORD: lab91minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks: [lab]
+
+  minio-test:
+    image: cgr.dev/chainguard/minio-client:latest-dev
+    container_name: lab-minio-test
+    depends_on: [minio]
+    entrypoint:
+      - sh
+      - -c
+      - >
+        until mc alias set minio http://minio:9000 labadmin lab91minio >/dev/null 2>&1; do sleep 1; done;
+        TS=$$(date +%Y%m%d%H%M%S);
+        (mc mb --ignore-existing --with-lock minio/backups &&
+        mc retention set --default COMPLIANCE 7d minio/backups &&
+        echo "teste escrita $$TS" > /tmp/teste_$$TS.txt &&
+        mc cp /tmp/teste_$$TS.txt minio/backups/teste_$$TS.txt &&
+        mc cat minio/backups/teste_$$TS.txt) && echo "MINIO TESTE OK" || echo "MINIO TESTE FALHOU"
+    networks: [lab]
+
+  backup:
+    image: postgres:16-alpine
+    container_name: lab-backup
+    depends_on: [pg-primary]
+    environment:
+      PGPASSWORD: lab91pass
+    entrypoint: >
+      sh -c 'mkdir -p /backups;
+        while true; do
+          pg_dump -h pg-primary -U postgres -d loja -Fc > /backups/bk_$$(date +%Y%m%d_%H%M).dump 2>/dev/null && echo "backup $$(date +%H:%M) OK" || echo "backup FALHOU";
+          sleep 900;
+        done'
+    volumes:
+      - backups_local:/backups
+    networks: [lab]
+
+  kuma:
+    image: louislam/uptime-kuma:2
+    container_name: lab-kuma
+    ports:
+      - "3001:3001"
+    volumes:
+      - kuma_data:/app/data
+    networks: [lab]
+
+volumes:
+  primary_data:
+  replica_data:
+  wal_archive:
+  minio_data:
+  backups_local:
+  kuma_data:
+
+networks:
+  lab:
+    driver: bridge
