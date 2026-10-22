@@ -50,10 +50,14 @@ case "$cmd" in
         echo "TREC $tr $(ts) RECUPERADO" | tee -a "$log" || exit $?
         echo "MTTR=$(hms $((tr-t0)))" | tee -a "$log" || exit $?
         echo "Recuperação registrada. MTTR = $(hms $((tr-t0)))."
-        echo "Agora reverta ao estado normal: ./lab.sh incidente reverter ${n}" ;;
+        if [[ "$n" == 1 && -f runtime/active && "$(cat runtime/active)" == pg-replica ]]; then
+          echo 'Para reintegrar o antigo nó, substituindo seus dados: ./lab.sh incidente reverter 1 --descartar-dados-do-no'
+        else
+          echo "Se ainda não reverteu, execute: ./lab.sh incidente reverter ${n}"
+        fi ;;
       reverter)
         [ -x "incidentes/${n}-reverter.sh" ] || { echo "Falta incidentes/${n}-reverter.sh"; exit 1; }
-        bash "incidentes/${n}-reverter.sh" 2>&1 | tee -a "$log" || exit $?
+        bash "incidentes/${n}-reverter.sh" "$@" 2>&1 | tee -a "$log" || exit $?
         checar && echo "Ambiente de volta ao normal (incidente ${n})." ;;
       *) echo "Subcomando inválido: $sub"; exit 1 ;;
     esac ;;
@@ -77,6 +81,7 @@ Comandos originais:
   ./lab.sh incidente marcar <n> "mensagem"
   ./lab.sh incidente recuperado <n>
   ./lab.sh incidente reverter <n>
+  ./lab.sh incidente reverter 1 --descartar-dados-do-no # após failover
 
 Comandos adicionados:
   ./lab.sh failover --aceitar-perda-potencial
